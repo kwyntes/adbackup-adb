@@ -148,6 +148,11 @@ static void help() {
         "     -a: preserve file timestamp and mode\n"
         "     -z: enable compression with a specified algorithm (any/none/brotli/lz4/zstd)\n"
         "     -Z: disable compression\n"
+        " pull-batch [-a] [-z ALGORITHM] [-Z] <REMOTE LOCAL>...\n"
+        "     copy multiple seperate files/dirs from device\n"
+        "     -a: preserve file timestamp and mode\n"
+        "     -z: enable compression with a specified algorithm (any/none/brotli/lz4/zstd)\n"
+        "     -Z: disable compression\n"
         " sync [-l] [-z ALGORITHM] [-Z] [all|data|odm|oem|product|system|system_ext|vendor]\n"
         "     sync a local build from $ANDROID_PRODUCT_OUT to the device (default all)\n"
         "     -n: dry run: push files to device without storing to the filesystem\n"
@@ -1349,6 +1354,50 @@ static void parse_push_pull_args(const char** arg, int narg, std::vector<const c
     }
 }
 
+static void parse_batch_pull_args(const char** arg, int narg, std::vector<std::pair<const char*, const char*>>* src_dsts,
+                                  bool* copy_attrs, CompressionType* compression) {
+    *copy_attrs = false;
+    if (const char* adb_compression = getenv("ADB_COMPRESSION")) {
+        *compression = parse_compression_type(adb_compression, true);
+    }
+
+    src_dsts->clear();
+    const char* unpaired_src = nullptr;
+    bool ignore_flags = false;
+    while (narg > 0) {
+        if (ignore_flags || *arg[0] != '-') {
+            if (unpaired_src != nullptr) {
+                src_dsts->push_back({unpaired_src, *arg});
+                unpaired_src = nullptr;
+            } else {
+                unpaired_src = *arg;
+            }
+        } else {
+            if (!strcmp(*arg, "-a")) {
+                *copy_attrs = true;
+            } else if (!strcmp(*arg, "-z")) {
+                if (narg < 2) {
+                    error_exit("-z requires an argument");
+                }
+                *compression = parse_compression_type(*++arg, false);
+                --narg;
+            } else if (!strcmp(*arg, "-Z")) {
+                *compression = CompressionType::None;
+            } else if (!strcmp(*arg, "--")) {
+                ignore_flags = true;
+            } else {
+                error_exit("unrecognized option '%s'", *arg);
+            }
+        }
+        ++arg;
+        --narg;
+    }
+
+    if (unpaired_src != nullptr) {
+        error_exit("unpaired source, missing argument destination");
+    }
+}
+
 static int adb_connect_command(const std::string& command, TransportId* transport,
                                StandardStreamsCallbackInterface* callback) {
     std::string error;
@@ -1963,6 +2012,14 @@ int adb_commandline(int argc, const char** argv) {
                              nullptr);
         if (srcs.empty()) error_exit("pull requires an argument");
         return do_sync_pull(srcs, dst, copy_attrs, compression) ? 0 : 1;
+    } else if (!strcmp(argv[0], "pull-batch")) {
+        bool copy_attrs = false;
+        CompressionType compression = CompressionType::None;
+        std::vector<std::pair<const char*, const char*>> src_dsts;
+
+        parse_batch_pull_args(&argv[1], argc - 1, &src_dsts, &copy_attrs, &compression);
+        if (src_dsts.empty()) error_exit("pull-batch requires an argument");
+        return do_sync_batch_pull(src_dsts, copy_attrs, compression) ? 0 : 1;
     } else if (!strcmp(argv[0], "install")) {
         if (argc < 2) error_exit("install requires an argument");
         return install_app(argc, argv);

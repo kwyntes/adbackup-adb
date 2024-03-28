@@ -26,6 +26,8 @@ bool do_sync_push(const std::vector<const char*>& srcs, const char* dst, bool sy
                   CompressionType compression, bool dry_run);
 bool do_sync_pull(const std::vector<const char*>& srcs, const char* dst, bool copy_attrs,
                   CompressionType compression, const char* name = nullptr);
+bool do_sync_batch_pull(const std::vector<std::pair<const char*, const char*>>& src_dsts,
+                        bool copy_attrs, CompressionType compression);
 
 bool do_sync_sync(const std::string& lpath, const std::string& rpath, bool list_only,
                   CompressionType compression, bool dry_run);
