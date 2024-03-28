@@ -69,11 +69,11 @@ static void Out(const std::string& s) {
 
 void LinePrinter::Print(string to_print, LineType type) {
   if (!smart_terminal_) {
-    if (type == LineType::INFO) {
-        info_line_ = to_print + "\n";
-    } else {
+    // if (type == LineType::INFO) {
+    //     info_line_ = to_print + "\n";
+    // } else {
         Out(to_print + "\n");
-    }
+    // }
     return;
   }
 
