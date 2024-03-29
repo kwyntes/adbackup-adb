@@ -153,6 +153,7 @@ static void help() {
         "     -a: preserve file timestamp and mode\n"
         "     -z: enable compression with a specified algorithm (any/none/brotli/lz4/zstd)\n"
         "     -Z: disable compression\n"
+        "     -I: read transfer list from stdin instead of args\n"
         " sync [-l] [-z ALGORITHM] [-Z] [all|data|odm|oem|product|system|system_ext|vendor]\n"
         "     sync a local build from $ANDROID_PRODUCT_OUT to the device (default all)\n"
         "     -n: dry run: push files to device without storing to the filesystem\n"
@@ -297,26 +298,26 @@ int read_and_dump_protocol(borrowed_fd fd, StandardStreamsCallbackInterface* cal
     int exit_code = 255;
     std::unique_ptr<ShellProtocol> protocol = std::make_unique<ShellProtocol>(fd);
     if (!protocol) {
-      LOG(ERROR) << "failed to allocate memory for ShellProtocol object";
-      return 1;
+        LOG(ERROR) << "failed to allocate memory for ShellProtocol object";
+        return 1;
     }
     while (protocol->Read()) {
-      if (protocol->id() == ShellProtocol::kIdStdout) {
-        if (!callback->OnStdout(protocol->data(), protocol->data_length())) {
-          exit_code = SIGPIPE + 128;
-          break;
+        if (protocol->id() == ShellProtocol::kIdStdout) {
+            if (!callback->OnStdout(protocol->data(), protocol->data_length())) {
+                exit_code = SIGPIPE + 128;
+                break;
+            }
+        } else if (protocol->id() == ShellProtocol::kIdStderr) {
+            if (!callback->OnStderr(protocol->data(), protocol->data_length())) {
+                exit_code = SIGPIPE + 128;
+                break;
+            }
+        } else if (protocol->id() == ShellProtocol::kIdExit) {
+            // data() returns a char* which doesn't have defined signedness.
+            // Cast to uint8_t to prevent 255 from being sign extended to INT_MIN,
+            // which doesn't get truncated on Windows.
+            exit_code = static_cast<uint8_t>(protocol->data()[0]);
         }
-      } else if (protocol->id() == ShellProtocol::kIdStderr) {
-        if (!callback->OnStderr(protocol->data(), protocol->data_length())) {
-          exit_code = SIGPIPE + 128;
-          break;
-        }
-      } else if (protocol->id() == ShellProtocol::kIdExit) {
-        // data() returns a char* which doesn't have defined signedness.
-        // Cast to uint8_t to prevent 255 from being sign extended to INT_MIN,
-        // which doesn't get truncated on Windows.
-        exit_code = static_cast<uint8_t>(protocol->data()[0]);
-      }
     }
     return exit_code;
 }
@@ -327,21 +328,21 @@ int read_and_dump(borrowed_fd fd, bool use_shell_protocol,
     if (fd < 0) return exit_code;
 
     if (use_shell_protocol) {
-      exit_code = read_and_dump_protocol(fd, callback);
+        exit_code = read_and_dump_protocol(fd, callback);
     } else {
-      char raw_buffer[BUFSIZ];
-      char* buffer_ptr = raw_buffer;
-      while (true) {
-        D("read_and_dump(): pre adb_read(fd=%d)", fd.get());
-        int length = adb_read(fd, raw_buffer, sizeof(raw_buffer));
-        D("read_and_dump(): post adb_read(fd=%d): length=%d", fd.get(), length);
-        if (length <= 0) {
-          break;
+        char raw_buffer[BUFSIZ];
+        char* buffer_ptr = raw_buffer;
+        while (true) {
+            D("read_and_dump(): pre adb_read(fd=%d)", fd.get());
+            int length = adb_read(fd, raw_buffer, sizeof(raw_buffer));
+            D("read_and_dump(): post adb_read(fd=%d): length=%d", fd.get(), length);
+            if (length <= 0) {
+                break;
+            }
+            if (!callback->OnStdout(buffer_ptr, length)) {
+                break;
+            }
         }
-        if (!callback->OnStdout(buffer_ptr, length)) {
-          break;
-        }
-      }
     }
 
     return callback->Done(exit_code);
@@ -467,8 +468,8 @@ static void send_window_size_change(int fd, std::unique_ptr<ShellProtocol>& shel
 #endif
 
     // Send the new window size as human-readable ASCII for debugging convenience.
-    size_t l = snprintf(shell->data(), shell->data_capacity(), "%dx%d,%dx%d",
-                        ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel);
+    size_t l = snprintf(shell->data(), shell->data_capacity(), "%dx%d,%dx%d", ws.ws_row, ws.ws_col,
+                        ws.ws_xpixel, ws.ws_ypixel);
     shell->Write(ShellProtocol::kIdWindowSizeChange, l + 1);
 }
 
@@ -528,8 +529,7 @@ static void stdin_read_thread_loop(void* x) {
     while (true) {
         // Use unix_read_interruptible() rather than adb_read() for stdin.
         D("stdin_read_thread_loop(): pre unix_read_interruptible(fdi=%d,...)", args->stdin_fd);
-        int r = unix_read_interruptible(args->stdin_fd, buffer_ptr,
-                                        buffer_size);
+        int r = unix_read_interruptible(args->stdin_fd, buffer_ptr, buffer_size);
         if (r == -1 && errno == EINTR) {
             send_window_size_change(args->stdin_fd, args->protocol);
             continue;
@@ -563,7 +563,7 @@ static void stdin_read_thread_loop(void* x) {
             } else {
                 if (state == kInEscape) {
                     if (ch == '.') {
-                        fprintf(stderr,"\r\n[ disconnected ]\r\n");
+                        fprintf(stderr, "\r\n[ disconnected ]\r\n");
                         stdin_raw_restore();
                         exit(0);
                     } else {
@@ -590,8 +590,7 @@ static void stdin_read_thread_loop(void* x) {
 }
 
 // Returns a shell service string with the indicated arguments and command.
-static std::string ShellServiceString(bool use_shell_protocol,
-                                      const std::string& type_arg,
+static std::string ShellServiceString(bool use_shell_protocol, const std::string& type_arg,
                                       const std::string& command) {
     std::vector<std::string> args;
     if (use_shell_protocol) {
@@ -607,10 +606,8 @@ static std::string ShellServiceString(bool use_shell_protocol,
     }
 
     // Shell service string can look like: shell[,arg1,arg2,...]:[command].
-    return android::base::StringPrintf("shell%s%s:%s",
-                                       args.empty() ? "" : ",",
-                                       android::base::Join(args, ',').c_str(),
-                                       command.c_str());
+    return android::base::StringPrintf("shell%s%s:%s", args.empty() ? "" : ",",
+                                       android::base::Join(args, ',').c_str(), command.c_str());
 }
 
 // Connects to a shell on the device and read/writes data.
@@ -638,7 +635,7 @@ static int RemoteShell(bool use_shell_protocol, const std::string& type_arg, cha
     std::string error;
     int fd = adb_connect(service_string, &error);
     if (fd < 0) {
-        fprintf(stderr,"error: %s\n", error.c_str());
+        fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
     }
 
@@ -695,18 +692,18 @@ static int adb_shell(int argc, const char** argv) {
     enum PtyAllocationMode { kPtyAuto, kPtyNo, kPtyYes, kPtyDefinitely };
 
     // Defaults.
-    char escape_char = '~';                                                 // -e
+    char escape_char = '~';  // -e
     auto&& features = adb_get_feature_set_or_die();
-    bool use_shell_protocol = CanUseFeature(*features, kFeatureShell2);     // -x
-    PtyAllocationMode tty = use_shell_protocol ? kPtyAuto : kPtyDefinitely; // -t/-T
+    bool use_shell_protocol = CanUseFeature(*features, kFeatureShell2);      // -x
+    PtyAllocationMode tty = use_shell_protocol ? kPtyAuto : kPtyDefinitely;  // -t/-T
 
     // Parse shell-specific command-line options.
-    argv[0] = "adb shell"; // So getopt(3) error messages start "adb shell".
+    argv[0] = "adb shell";  // So getopt(3) error messages start "adb shell".
 #ifdef _WIN32
     // fixes "adb shell -l" crash on Windows, b/37284906
     __argv = const_cast<char**>(argv);
 #endif
-    optind = 1; // argv[0] is always "shell", so set `optind` appropriately.
+    optind = 1;  // argv[0] is always "shell", so set `optind` appropriately.
     int opt;
     while ((opt = getopt(argc, const_cast<char**>(argv), "+e:ntTx")) != -1) {
         switch (opt) {
@@ -764,8 +761,7 @@ static int adb_shell(int argc, const char** argv) {
         }
     }
 
-    D("shell -e 0x%x t=%d use_shell_protocol=%s shell_type_arg=%s\n",
-      escape_char, tty,
+    D("shell -e 0x%x t=%d use_shell_protocol=%s shell_type_arg=%s\n", escape_char, tty,
       use_shell_protocol ? "true" : "false",
       (shell_type_arg == kShellServiceArgPty) ? "pty" : "raw");
 
@@ -1195,8 +1191,8 @@ static int backup(int argc, const char** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp("-f", argv[i])) {
             if (i == argc - 1) error_exit("backup -f passed with no filename");
-            filename = argv[i+1];
-            for (int j = i+2; j <= argc; ) {
+            filename = argv[i + 1];
+            for (int j = i + 2; j <= argc;) {
                 argv[i++] = argv[j++];
             }
             argc -= 2;
@@ -1354,7 +1350,8 @@ static void parse_push_pull_args(const char** arg, int narg, std::vector<const c
     }
 }
 
-static void parse_batch_pull_args(const char** arg, int narg, std::vector<std::pair<const char*, const char*>>* src_dsts,
+static void parse_batch_pull_args(const char** arg, int narg,
+                                  std::vector<std::pair<const char*, const char*>>* src_dsts,
                                   bool* copy_attrs, CompressionType* compression) {
     *copy_attrs = false;
     if (const char* adb_compression = getenv("ADB_COMPRESSION")) {
@@ -1364,6 +1361,8 @@ static void parse_batch_pull_args(const char** arg, int narg, std::vector<std::p
     src_dsts->clear();
     const char* unpaired_src = nullptr;
     bool ignore_flags = false;
+    bool read_from_stdin = false;
+    bool has_read_from_args = false;
     while (narg > 0) {
         if (ignore_flags || *arg[0] != '-') {
             if (unpaired_src != nullptr) {
@@ -1372,6 +1371,13 @@ static void parse_batch_pull_args(const char** arg, int narg, std::vector<std::p
             } else {
                 unpaired_src = *arg;
             }
+
+            if (read_from_stdin) {
+                error_exit(
+                        "transfers may not be specified on command line "
+                        "when reading from stdin");
+            }
+            has_read_from_args = true;
         } else {
             if (!strcmp(*arg, "-a")) {
                 *copy_attrs = true;
@@ -1383,6 +1389,28 @@ static void parse_batch_pull_args(const char** arg, int narg, std::vector<std::p
                 --narg;
             } else if (!strcmp(*arg, "-Z")) {
                 *compression = CompressionType::None;
+            } else if (!strcmp(*arg, "-I")) {
+                read_from_stdin = true;
+                if (has_read_from_args) {
+                    error_exit(
+                            "transfers may not be specified on command line "
+                            "when reading from stdin");
+                }
+
+                std::string line;
+                while (std::getline(std::cin, line)) {
+                    // FIXME: this is never freed
+                    // or like, not. it shouldn't matter anyway
+                    char* cline = new char[line.size() + 1];
+                    cline[line.copy(cline, line.size())] = '\0';
+
+                    if (unpaired_src != nullptr) {
+                        src_dsts->push_back({unpaired_src, cline});
+                        unpaired_src = nullptr;
+                    } else {
+                        unpaired_src = cline;
+                    }
+                }
             } else if (!strcmp(*arg, "--")) {
                 ignore_flags = true;
             } else {
@@ -1394,7 +1422,7 @@ static void parse_batch_pull_args(const char** arg, int narg, std::vector<std::p
     }
 
     if (unpaired_src != nullptr) {
-        error_exit("unpaired source, missing argument destination");
+        error_exit("unpaired source, missing destination");
     }
 }
 
@@ -1431,7 +1459,7 @@ class TrackAppStreamsCallback : public DefaultStandardStreamsCallback {
         int written = snprintf(summary, sizeof(summary), "Process count: %d\n",
                                binary_proto.process_size());
         if (!OnStream(nullptr, stdout, summary, written, false)) {
-          return false;
+            return false;
         }
 
         std::string string_proto;
@@ -1721,7 +1749,7 @@ int adb_commandline(int argc, const char** argv) {
             r = launch_server(server_socket_str, one_device_str);
         }
         if (r) {
-            fprintf(stderr,"* could not start server *\n");
+            fprintf(stderr, "* could not start server *\n");
         }
         return r;
     }
@@ -1752,7 +1780,7 @@ int adb_commandline(int argc, const char** argv) {
 
     /* adb_connect() commands */
     if (!strcmp(argv[0], "devices")) {
-        const char *listopt;
+        const char* listopt;
         if (argc < 2) {
             listopt = "";
         } else if (argc == 2 && !strcmp(argv[1], "-l")) {
@@ -1785,8 +1813,8 @@ int adb_commandline(int argc, const char** argv) {
     } else if (!strcmp(argv[0], "disconnect")) {
         if (argc > 2) error_exit("usage: adb disconnect [HOST[:PORT]]");
 
-        std::string query = android::base::StringPrintf("host:disconnect:%s",
-                                                        (argc == 2) ? argv[1] : "");
+        std::string query =
+                android::base::StringPrintf("host:disconnect:%s", (argc == 2) ? argv[1] : "");
         return adb_query_command(query);
     } else if (!strcmp(argv[0], "abb")) {
         return adb_abb(argc, argv);
@@ -2018,7 +2046,7 @@ int adb_commandline(int argc, const char** argv) {
         std::vector<std::pair<const char*, const char*>> src_dsts;
 
         parse_batch_pull_args(&argv[1], argc - 1, &src_dsts, &copy_attrs, &compression);
-        if (src_dsts.empty()) error_exit("pull-batch requires an argument");
+        if (src_dsts.empty()) error_exit("no transfers specified");
         return do_sync_batch_pull(src_dsts, copy_attrs, compression) ? 0 : 1;
     } else if (!strcmp(argv[0], "install")) {
         if (argc < 2) error_exit("install requires an argument");
